@@ -17,6 +17,24 @@ import { parseMarkdownWithFrontmatter, MarkdownRenderer } from '../utils/markdow
 import { useChainId } from '../hooks/useChainId';
 import { getTokenByAddress } from '../config/tokens';
 
+// ERC20 ABI for fetching token metadata
+const erc20Abi = [
+  {
+    name: 'decimals',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+  {
+    name: 'symbol',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'string' }],
+  },
+];
+
 const Bounty = () => {
   const { tokenId } = useParams();
   const navigate = useNavigate();
@@ -29,6 +47,7 @@ const Bounty = () => {
 
   const [claimData, setClaimData] = useState('');
   const [selectedClaim, setSelectedClaim] = useState(null);
+  const [customTokenMetadata, setCustomTokenMetadata] = useState(null);
   const [descriptionText, setDescriptionText] = useState(null);
   const [descriptionTitle, setDescriptionTitle] = useState(null);
   const [descriptionLoading, setDescriptionLoading] = useState(false);
@@ -51,15 +70,21 @@ const Bounty = () => {
     if (tokenAddr === '0x0000000000000000000000000000000000000000' || !tokenAddr) {
       return `${formatEther(BigInt(amount))} ETH`;
     }
-    
-    // Look up token by address
+
+    // Look up token by address in config
     const token = getTokenByAddress(tokenAddr, chainId);
     if (token) {
       const formattedAmount = formatUnits(BigInt(amount), token.decimals);
       return `${formattedAmount} ${token.symbol}`;
     }
-    
-    // Fallback if token not found in config
+
+    // Check if we have fetched metadata for this custom token
+    if (customTokenMetadata) {
+      const formattedAmount = formatUnits(BigInt(amount), customTokenMetadata.decimals);
+      return `${formattedAmount} ${customTokenMetadata.symbol}`;
+    }
+
+    // Fallback while loading or if fetch failed
     return `${amount} tokens`;
   };
 
@@ -133,6 +158,47 @@ const Bounty = () => {
     fetchTimestamps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicClient, bounty?.createdAt, claims]);
+
+  // Fetch token metadata for custom tokens
+  useEffect(() => {
+    if (!bounty?.tokenAddr || !publicClient || !chainId) return;
+
+    const tokenAddr = bounty.tokenAddr;
+    if (tokenAddr === '0x0000000000000000000000000000000000000000' || getTokenByAddress(tokenAddr, chainId)) {
+      // Not a custom token
+      return;
+    }
+
+    const fetchTokenMetadata = async () => {
+      try {
+        const [decimals, symbol] = await Promise.all([
+          publicClient.readContract({
+            address: tokenAddr,
+            abi: erc20Abi,
+            functionName: 'decimals',
+          }),
+          publicClient.readContract({
+            address: tokenAddr,
+            abi: erc20Abi,
+            functionName: 'symbol',
+          }),
+        ]);
+
+        setCustomTokenMetadata({
+          decimals: Number(decimals),
+          symbol: String(symbol),
+        });
+      } catch (err) {
+        console.error(`Error fetching metadata for token ${tokenAddr}:`, err);
+        setCustomTokenMetadata({
+          decimals: 18,
+          symbol: 'UNKNOWN',
+        });
+      }
+    };
+
+    fetchTokenMetadata();
+  }, [bounty?.tokenAddr, publicClient, chainId]);
 
   // Fetch description text from dservice
   useEffect(() => {

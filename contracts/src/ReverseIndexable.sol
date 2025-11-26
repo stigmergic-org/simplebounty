@@ -52,9 +52,12 @@ abstract contract ReverseIndexable {
     event BlockPointer(uint256 previousBlock);
 
     /// @notice Records the current block number in the reverse-indexable chain
-    /// @dev Emits a BlockPointer event with the previous block pointer value, then updates blockPointer
+    /// @dev Emits a BlockPointer event with the previous block pointer value, then updates blockPointer.
+    ///      Subsequent calls within the same block are ignored to avoid duplicate pointers.
     function touchIndex() internal {
-        emit BlockPointer(blockPointer);
+        uint256 previousBlock = blockPointer;
+        if (previousBlock == block.number) return;
+        emit BlockPointer(previousBlock);
         blockPointer = block.number;
     }
 }

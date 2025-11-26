@@ -11,12 +11,31 @@ import { parseMarkdownWithFrontmatter } from '../utils/markdown';
 import { useChainId } from '../hooks/useChainId';
 import { getTokenByAddress } from '../config/tokens';
 
+// ERC20 ABI for fetching token metadata
+const erc20Abi = [
+  {
+    name: 'decimals',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+  {
+    name: 'symbol',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'string' }],
+  },
+];
+
 const Landing = () => {
   const navigate = useNavigate();
   const publicClient = usePublicClient();
   const chainId = useChainId();
   const { bounties, isLoading, error } = useBountiesContext();
   const [descriptionTitles, setDescriptionTitles] = useState({});
+  const [tokenMetadata, setTokenMetadata] = useState({});
 
   // Helper function to check if bounty is fulfilled
   const isBountyFulfilled = (bounty) => {
@@ -32,15 +51,22 @@ const Landing = () => {
     if (tokenAddr === '0x0000000000000000000000000000000000000000' || !tokenAddr) {
       return `${formatEther(BigInt(amount))} ETH`;
     }
-    
-    // Look up token by address
+
+    // Look up token by address in config
     const token = getTokenByAddress(tokenAddr, chainId);
     if (token) {
       const formattedAmount = formatUnits(BigInt(amount), token.decimals);
       return `${formattedAmount} ${token.symbol}`;
     }
-    
-    // Fallback if token not found in config
+
+    // Check if we have fetched metadata for this custom token
+    const customToken = tokenMetadata[tokenAddr.toLowerCase()];
+    if (customToken) {
+      const formattedAmount = formatUnits(BigInt(amount), customToken.decimals);
+      return `${formattedAmount} ${customToken.symbol}`;
+    }
+
+    // Fallback while loading or if fetch failed
     return `${amount} tokens`;
   };
 
@@ -84,6 +110,69 @@ const Landing = () => {
 
     fetchTitles();
   }, [bounties, publicClient]);
+
+  // Fetch token metadata for custom tokens not in config
+  useEffect(() => {
+    if (!bounties || bounties.length === 0 || !publicClient || !chainId) return;
+
+    const fetchTokenMetadata = async () => {
+      // Collect unique token addresses that are not in config
+      const customTokenAddresses = new Set();
+      bounties.forEach(bounty => {
+        if (bounty.tokenAddr &&
+            bounty.tokenAddr !== '0x0000000000000000000000000000000000000000' &&
+            !getTokenByAddress(bounty.tokenAddr, chainId)) {
+          customTokenAddresses.add(bounty.tokenAddr);
+        }
+      });
+
+      if (customTokenAddresses.size === 0) return;
+
+      console.log(`[Landing] Fetching metadata for ${customTokenAddresses.size} custom tokens`);
+
+      // Fetch metadata for each custom token
+      const metadataPromises = Array.from(customTokenAddresses).map(async (address) => {
+        try {
+          const [decimals, symbol] = await Promise.all([
+            publicClient.readContract({
+              address,
+              abi: erc20Abi,
+              functionName: 'decimals',
+            }),
+            publicClient.readContract({
+              address,
+              abi: erc20Abi,
+              functionName: 'symbol',
+            }),
+          ]);
+
+          return {
+            address,
+            decimals: Number(decimals),
+            symbol: String(symbol),
+          };
+        } catch (err) {
+          console.error(`Error fetching metadata for token ${address}:`, err);
+          return {
+            address,
+            decimals: 18, // fallback
+            symbol: 'UNKNOWN',
+          };
+        }
+      });
+
+      const metadataResults = await Promise.all(metadataPromises);
+      const metadataMap = {};
+      metadataResults.forEach(meta => {
+        metadataMap[meta.address.toLowerCase()] = meta;
+      });
+
+      setTokenMetadata(metadataMap);
+      console.log(`[Landing] Fetched metadata for ${metadataResults.length} custom tokens`);
+    };
+
+    fetchTokenMetadata();
+  }, [bounties, publicClient, chainId]);
 
   if (isLoading) {
     return (
