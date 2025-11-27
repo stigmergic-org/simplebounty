@@ -48,6 +48,7 @@ const Landing = () => {
   };
 
   const formatAmount = (amount, tokenAddr) => {
+    if (amount === undefined || amount === null) return '0';
     if (tokenAddr === '0x0000000000000000000000000000000000000000' || !tokenAddr) {
       return `${formatEther(BigInt(amount))} ETH`;
     }
