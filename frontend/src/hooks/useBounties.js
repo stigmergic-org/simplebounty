@@ -12,6 +12,7 @@ export function useBounties() {
   const chainId = useChainId();
   const [bounties, setBounties] = useState([]);
   const [claims, setClaims] = useState({});
+  const [updates, setUpdates] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const lastBlockPointerRef = useRef(0);
@@ -74,6 +75,7 @@ export function useBounties() {
         // Update state after each block is processed
         setBounties(state.bounties);
         setClaims(state.claims);
+        setUpdates(state.updates);
         
         // Set loading to false after first update so UI can show bounties as they load
         if (!hasReceivedUpdate) {
@@ -123,6 +125,7 @@ export function useBounties() {
   return {
     bounties,
     claims,
+    updates,
     isLoading,
     error,
     refresh: () => refreshBounties(false),

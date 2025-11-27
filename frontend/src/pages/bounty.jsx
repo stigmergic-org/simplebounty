@@ -4,6 +4,7 @@ import { useAccount, usePublicClient, useEnsName } from 'wagmi';
 import { useBounty } from '../hooks/useBounty';
 import { useMakeClaim } from '../hooks/useMakeClaim';
 import { useFulfillClaim } from '../hooks/useFulfillClaim';
+import { useUpdateBounty } from '../hooks/useUpdateBounty';
 import { useBountiesContext } from '../contexts/BountiesContext';
 import WalletInfo from '../components/WalletInfo';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -13,7 +14,7 @@ import Avatar from '../components/Avatar';
 import Username from '../components/Username';
 import { formatEther, formatUnits } from 'viem';
 import { fetchTextData } from '../utils/dservice-upload';
-import { parseMarkdownWithFrontmatter, MarkdownRenderer } from '../utils/markdown';
+import { parseMarkdownWithFrontmatter, formatMarkdownWithFrontmatter, MarkdownRenderer } from '../utils/markdown';
 import { useChainId } from '../hooks/useChainId';
 import { getTokenByAddress } from '../config/tokens';
 
@@ -44,17 +45,23 @@ const Bounty = () => {
   const { bounty, claims, isLoading, error } = useBounty(tokenId);
   const { makeClaim, hash: claimHash, isPending: isClaimPending, isConfirming: isClaimConfirming, isSuccess: isClaimSuccess, error: claimError, reset: resetClaim } = useMakeClaim();
   const { fulfillClaim, hash: fulfillHash, isPending: isFulfillPending, isConfirming: isFulfillConfirming, isSuccess: isFulfillSuccess, error: fulfillError, reset: resetFulfill } = useFulfillClaim();
+  const { updateBounty, hash: updateHash, isPending: isUpdatePending, isConfirming: isUpdateConfirming, isSuccess: isUpdateSuccess, error: updateError, reset: resetUpdate } = useUpdateBounty();
 
   const [claimData, setClaimData] = useState('');
   const [selectedClaim, setSelectedClaim] = useState(null);
   const [customTokenMetadata, setCustomTokenMetadata] = useState(null);
   const [descriptionText, setDescriptionText] = useState(null);
   const [descriptionTitle, setDescriptionTitle] = useState(null);
+  const [fullDescriptionText, setFullDescriptionText] = useState(null);
   const [descriptionLoading, setDescriptionLoading] = useState(false);
   const [descriptionError, setDescriptionError] = useState(null);
   const [claimTexts, setClaimTexts] = useState({});
   const [blockTimestamps, setBlockTimestamps] = useState({});
-  const { refresh: refreshBounties } = useBountiesContext();
+  const [isEditingDescription, setIsEditingDescription] = useState(false);
+  const [editDescriptionText, setEditDescriptionText] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
+  const [historicalDescriptions, setHistoricalDescriptions] = useState({});
+  const { updates, refresh: refreshBounties } = useBountiesContext();
 
   // Helper function to check if bounty is fulfilled
   const isBountyFulfilled = (bounty) => {
@@ -131,6 +138,15 @@ const Bounty = () => {
         blocksToFetch.add(bounty.createdAt);
       }
 
+      // Add update blocks
+      if (updates[tokenId]) {
+        updates[tokenId].forEach(update => {
+          if (update.blockNumber) {
+            blocksToFetch.add(update.blockNumber);
+          }
+        });
+      }
+
       // Add claim blocks
       claims.forEach(claim => {
         if (claim.blockNumber) {
@@ -157,7 +173,7 @@ const Bounty = () => {
 
     fetchTimestamps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publicClient, bounty?.createdAt, claims]);
+  }, [publicClient, bounty?.createdAt, claims, updates, tokenId]);
 
   // Fetch token metadata for custom tokens
   useEffect(() => {
@@ -218,6 +234,7 @@ const Bounty = () => {
         const { title, body } = parseMarkdownWithFrontmatter(text);
         setDescriptionTitle(title);
         setDescriptionText(body);
+        setFullDescriptionText(text);
         setDescriptionLoading(false);
       })
       .catch(err => {
@@ -254,6 +271,32 @@ const Bounty = () => {
 
     fetchClaimTexts();
   }, [claims, publicClient]);
+
+  // Fetch historical descriptions when history is shown
+  useEffect(() => {
+    if (!showHistory || !updates[tokenId] || !publicClient) return;
+
+    const fetchHistoricalDescriptions = async () => {
+      const descriptions = {};
+      for (const update of updates[tokenId]) {
+        if (!update.newData || update.newData === '0x0000000000000000000000000000000000000000000000000000000000000000') {
+          descriptions[update.transactionHash] = 'No description data';
+          continue;
+        }
+        try {
+          const text = await fetchTextData(update.newData, publicClient);
+          const { title, body } = parseMarkdownWithFrontmatter(text);
+          descriptions[update.transactionHash] = { title, body, fullText: text };
+        } catch (err) {
+          console.error('Error fetching historical description:', err);
+          descriptions[update.transactionHash] = { title: null, body: `Error loading description: ${err.message}`, fullText: null };
+        }
+      }
+      setHistoricalDescriptions(descriptions);
+    };
+
+    fetchHistoricalDescriptions();
+  }, [showHistory, updates, tokenId, publicClient]);
 
 
   const handleMakeClaim = async () => {
@@ -305,6 +348,36 @@ const Bounty = () => {
     if (isBountyFulfilled(bounty)) return;
     // Single select: if already selected, deselect; otherwise select this one
     setSelectedClaim(selectedClaim === transactionHash ? null : transactionHash);
+  };
+
+  const handleEditDescription = () => {
+    // Initialize edit text with only the body (hide frontmatter)
+    const currentText = descriptionText || '';
+    setEditDescriptionText(currentText);
+    setIsEditingDescription(true);
+  };
+
+  const handleSaveDescription = async () => {
+    if (!editDescriptionText.trim()) {
+      alert('Description cannot be empty');
+      return;
+    }
+    try {
+      // Reconstruct full text with frontmatter using original title
+      const fullText = formatMarkdownWithFrontmatter(descriptionTitle, editDescriptionText.trim());
+      await updateBounty(tokenId, fullText);
+    } catch (err) {
+      console.error('Error updating bounty:', err);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditingDescription(false);
+    setEditDescriptionText('');
+  };
+
+  const handleViewEditHistory = () => {
+    setShowHistory(!showHistory);
   };
 
   // Clear selected claim when bounty becomes fulfilled
@@ -380,6 +453,20 @@ const Bounty = () => {
           }}
         />
 
+        <TransactionStatus
+          status={isUpdatePending || isUpdateConfirming ? 'pending' : isUpdateSuccess ? 'success' : updateError ? 'error' : null}
+          hash={updateHash}
+          error={updateError}
+          isConfirmed={isUpdateSuccess}
+          reset={resetUpdate}
+          redirectPath={`/${tokenId}`}
+          onSuccess={() => {
+            setIsEditingDescription(false);
+            setEditDescriptionText('');
+            refreshBounties();
+          }}
+        />
+
         {/* Header */}
         <div className="mb-3 sm:mb-4">
           <div className="flex items-center justify-between mb-2">
@@ -419,9 +506,56 @@ const Bounty = () => {
                     • {formatRelativeTime(blockTimestamps[bounty.createdAt])}
                   </span>
                 )}
+                <div className="ml-auto flex gap-2">
+                  {bounty.lastUpdated && bounty.createdAt && bounty.lastUpdated > bounty.createdAt && (
+                    <button
+                      onClick={handleViewEditHistory}
+                      className={`btn btn-ghost btn-xs text-xs ${showHistory ? 'btn-active' : ''}`}
+                      title={showHistory ? "Hide edit history" : "View edit history"}
+                    >
+                      📝 History
+                    </button>
+                  )}
+                  {isOwner && !isBountyFulfilled(bounty) && fullDescriptionText && (
+                    <button
+                      onClick={handleEditDescription}
+                      disabled={isUpdatePending}
+                      className="btn btn-ghost btn-xs text-xs"
+                      title="Edit description"
+                    >
+                      ✏️ Edit
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="prose prose-sm max-w-none">
-                {descriptionLoading ? (
+                {isEditingDescription ? (
+                  <div className="space-y-3">
+                    <textarea
+                      className="textarea textarea-bordered w-full min-h-[120px] resize-none"
+                      placeholder="Enter bounty description (markdown supported)..."
+                      value={editDescriptionText}
+                      onChange={(e) => setEditDescriptionText(e.target.value)}
+                      rows={8}
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={handleCancelEdit}
+                        className="btn btn-ghost btn-sm"
+                        disabled={isUpdatePending}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleSaveDescription}
+                        disabled={isUpdatePending || !editDescriptionText.trim()}
+                        className="btn btn-primary btn-sm"
+                      >
+                        {isUpdatePending ? 'Saving...' : 'Save Changes'}
+                      </button>
+                    </div>
+                  </div>
+                ) : descriptionLoading ? (
                   <div className="flex items-center gap-2 py-4">
                     <span className="loading loading-spinner loading-sm"></span>
                     <span className="text-base-content/60">Loading description...</span>
@@ -435,6 +569,64 @@ const Bounty = () => {
             </div>
           </div>
         </div>
+
+        {/* Edit History */}
+        {showHistory && updates[tokenId] && updates[tokenId].length > 0 && (
+          <div className="mt-4 sm:mt-6">
+            <div className="border border-base-300 rounded-lg bg-base-100">
+              <div className="flex items-center justify-between p-3 sm:p-4 border-b border-base-300">
+                <h3 className="text-base sm:text-lg font-semibold">
+                  Version History ({updates[tokenId].length} version{updates[tokenId].length !== 1 ? 's' : ''})
+                </h3>
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="btn btn-ghost btn-sm"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="divide-y divide-base-300">
+                {updates[tokenId]
+                  .sort((a, b) => b.blockNumber - a.blockNumber) // Most recent first
+                  .map((update, index) => {
+                    const historicalDesc = historicalDescriptions[update.transactionHash];
+                    return (
+                      <div key={update.transactionHash || `creation-${update.blockNumber}`} className="p-3 sm:p-4">
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="text-sm text-base-content/60">
+                            {update.isCreation ? 'Created' : 'Edited'} {formatRelativeTime(blockTimestamps[update.blockNumber] || update.blockNumber)}
+                          </span>
+                          <span className="text-xs text-base-content/40">
+                            Block {update.blockNumber}
+                          </span>
+                          {index === 0 && (
+                            <span className="badge badge-primary badge-xs">Latest</span>
+                          )}
+                          {update.isCreation && (
+                            <span className="badge badge-secondary badge-xs">Original</span>
+                          )}
+                        </div>
+                        <div className="border border-base-300 rounded-lg bg-base-50 p-3">
+                          {historicalDesc ? (
+                            <div>
+                              {historicalDesc.title && (
+                                <h4 className="font-semibold text-lg mb-2">{historicalDesc.title}</h4>
+                              )}
+                              <div className="prose prose-sm max-w-none">
+                                <MarkdownRenderer markdown={historicalDesc.body} />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-base-content/60 italic">Loading historical description...</div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Claims/Comments - GitHub style */}
         {claims.length > 0 && (

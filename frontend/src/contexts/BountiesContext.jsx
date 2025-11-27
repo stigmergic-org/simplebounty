@@ -9,7 +9,7 @@ const BountiesContext = createContext(null);
  */
 export function BountiesProvider({ children }) {
   const bountiesData = useBounties();
-  
+
   return (
     <BountiesContext.Provider value={bountiesData}>
       {children}

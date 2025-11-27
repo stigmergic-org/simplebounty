@@ -210,6 +210,7 @@ export function parseEvent(event) {
 export function buildStateFromEvents(events) {
   const bounties = new Map();
   const claims = new Map(); // tokenId -> array of claims
+  const updates = new Map(); // tokenId -> array of updates
 
   for (const event of events) {
     switch (event.type) {
@@ -219,7 +220,7 @@ export function buildStateFromEvents(events) {
         const existingBounty = bounties.get(event.tokenId);
         if (existingBounty) {
           // Preserve newer state (fulfilled, winner, etc.) and only update creation data
-          existingBounty.data = event.data;
+          // Don't overwrite data - existing bounty already has latest data from updates
           existingBounty.tokenAddr = event.tokenAddr;
           existingBounty.amount = event.amount;
           existingBounty.creator = event.creator;
@@ -228,19 +229,31 @@ export function buildStateFromEvents(events) {
           if (!existingBounty.lastUpdated || event.blockNumber > existingBounty.lastUpdated) {
             existingBounty.lastUpdated = event.blockNumber;
           }
-        } else {
-          // Create new bounty entry
-          bounties.set(event.tokenId, {
-            tokenId: event.tokenId,
-            data: event.data,
-            tokenAddr: event.tokenAddr,
-            amount: event.amount,
-            creator: event.creator,
-            createdAt: event.blockNumber,
-            lastUpdated: event.blockNumber,
+          } else {
+            // Create new bounty entry
+            bounties.set(parsed.tokenId, {
+              tokenId: parsed.tokenId,
+              data: parsed.data,
+              tokenAddr: parsed.tokenAddr,
+              amount: parsed.amount,
+              creator: parsed.creator,
+              createdAt: parsed.blockNumber,
+              lastUpdated: parsed.blockNumber,
+            });
+          }
+
+          // Add creation data to updates history
+          if (!updates.has(parsed.tokenId)) {
+            updates.set(parsed.tokenId, []);
+          }
+          // Add creation as the first entry
+          updates.get(parsed.tokenId).unshift({
+            newData: parsed.data,
+            blockNumber: parsed.blockNumber,
+            transactionHash: parsed.transactionHash,
+            isCreation: true,
           });
-        }
-        break;
+          break;
       
       case 'BountyToppedUp':
         const toppedUp = bounties.get(event.tokenId);
@@ -252,8 +265,28 @@ export function buildStateFromEvents(events) {
         break;
       
       case 'BountyUpdated':
-        const updated = bounties.get(event.tokenId);
-        if (updated) {
+        // Store update history
+        if (!updates.has(event.tokenId)) {
+          updates.set(event.tokenId, []);
+        }
+        updates.get(event.tokenId).push({
+          newData: event.newData,
+          blockNumber: event.blockNumber,
+          transactionHash: event.transactionHash,
+        });
+
+        let updated = bounties.get(event.tokenId);
+        if (!updated) {
+          // Bounty doesn't exist yet (reverse indexing), create it with updated data
+          console.log(`[Indexer] Bounty updated (creating): tokenId=${event.tokenId}, newData=${event.newData}, block=${event.blockNumber}`);
+          updated = {
+            tokenId: event.tokenId,
+            data: event.newData,
+            lastUpdated: event.blockNumber,
+            // Other fields will be filled in by BountyCreated when processed
+          };
+          bounties.set(event.tokenId, updated);
+        } else {
           console.log(`[Indexer] Bounty updated: tokenId=${event.tokenId}, newData=${event.newData}, block=${event.blockNumber}`);
           // Only update data if this is a newer event (don't overwrite newer data with older data)
           if (!updated.lastUpdated || event.blockNumber > updated.lastUpdated) {
@@ -294,6 +327,7 @@ export function buildStateFromEvents(events) {
   return {
     bounties: Array.from(bounties.values()),
     claims: Object.fromEntries(claims),
+    updates: Object.fromEntries(updates),
   };
 }
 
@@ -324,6 +358,7 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
       yield {
         bounties: [],
         claims: {},
+        updates: {},
       };
       return;
     }
@@ -333,6 +368,7 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
     // Track state incrementally as we process blocks
     const bounties = new Map();
     const claims = new Map(); // tokenId -> array of claims
+    const updates = new Map(); // tokenId -> array of updates
     let eventCount = 0;
     let lastBlockTime = performance.now();
 
@@ -391,7 +427,7 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
             const existingBounty = bounties.get(event.tokenId);
             if (existingBounty) {
               // Preserve newer state (fulfilled, winner, etc.) and only update creation data
-              existingBounty.data = event.data;
+              // Don't overwrite data - existing bounty already has latest data from updates
               existingBounty.tokenAddr = event.tokenAddr;
               existingBounty.amount = event.amount;
               existingBounty.creator = event.creator;
@@ -412,6 +448,18 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
                 lastUpdated: event.blockNumber,
               });
             }
+
+            // Add creation data to updates history
+            if (!updates.has(event.tokenId)) {
+              updates.set(event.tokenId, []);
+            }
+            // Add creation as the first entry
+            updates.get(event.tokenId).unshift({
+              newData: event.data,
+              blockNumber: event.blockNumber,
+              transactionHash: event.transactionHash,
+              isCreation: true,
+            });
             break;
           
           case 'BountyToppedUp':
@@ -424,8 +472,28 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
             break;
           
           case 'BountyUpdated':
-            const updated = bounties.get(event.tokenId);
-            if (updated) {
+            // Store update history
+            if (!updates.has(event.tokenId)) {
+              updates.set(event.tokenId, []);
+            }
+            updates.get(event.tokenId).push({
+              newData: event.newData,
+              blockNumber: event.blockNumber,
+              transactionHash: event.transactionHash,
+            });
+
+            let updated = bounties.get(event.tokenId);
+            if (!updated) {
+              // Bounty doesn't exist yet (reverse indexing), create it with updated data
+              console.log(`[Indexer] Bounty updated (creating): tokenId=${event.tokenId}, newData=${event.newData}, block=${event.blockNumber}`);
+              updated = {
+                tokenId: event.tokenId,
+                data: event.newData,
+                lastUpdated: event.blockNumber,
+                // Other fields will be filled in by BountyCreated when processed
+              };
+              bounties.set(event.tokenId, updated);
+            } else {
               console.log(`[Indexer] Bounty updated: tokenId=${event.tokenId}, newData=${event.newData}, block=${event.blockNumber}`);
               // Only update data if this is a newer event (don't overwrite newer data with older data)
               if (!updated.lastUpdated || event.blockNumber > updated.lastUpdated) {
@@ -516,6 +584,7 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
       yield {
         bounties: Array.from(bounties.values()),
         claims: Object.fromEntries(claims),
+        updates: Object.fromEntries(updates),
       };
 
       // Get next block from BlockPointer event
@@ -562,6 +631,7 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
     yield {
       bounties: finalBounties,
       claims: Object.fromEntries(claims),
+      updates: Object.fromEntries(updates),
     };
   } catch (error) {
     console.error('Error indexing contract events:', error);
@@ -578,7 +648,7 @@ export async function* indexAllEvents(publicClient, contractAddress, chainId) {
  * @param {Object} existingState - Existing state with bounties and claims
  * @returns {Object} Updated state with new events applied
  */
-export async function getNewEventsInRange(publicClient, contractAddress, fromBlock, toBlock, existingState = { bounties: [], claims: {} }) {
+export async function getNewEventsInRange(publicClient, contractAddress, fromBlock, toBlock, existingState = { bounties: [], claims: {}, updates: {} }) {
   if (fromBlock > toBlock || fromBlock === 0) {
     return existingState;
   }
@@ -594,10 +664,16 @@ export async function getNewEventsInRange(publicClient, contractAddress, fromBlo
     // Convert existing state to Maps for easier manipulation
     const bounties = new Map((existingState.bounties || []).map(b => [b.tokenId, { ...b }]));
     const claims = new Map();
-    
+    const updates = new Map();
+
     // Initialize claims map from existing state
     Object.entries(existingState.claims || {}).forEach(([tokenId, claimList]) => {
       claims.set(Number(tokenId), [...claimList]);
+    });
+
+    // Initialize updates map from existing state
+    Object.entries(existingState.updates || {}).forEach(([tokenId, updateList]) => {
+      updates.set(Number(tokenId), [...updateList]);
     });
 
     // Process new events
@@ -646,8 +722,28 @@ export async function getNewEventsInRange(publicClient, contractAddress, fromBlo
             break;
 
           case 'BountyUpdated':
-            const updated = bounties.get(parsed.tokenId);
-            if (updated) {
+            // Store update history
+            if (!updates.has(parsed.tokenId)) {
+              updates.set(parsed.tokenId, []);
+            }
+            updates.get(parsed.tokenId).push({
+              newData: parsed.newData,
+              blockNumber: parsed.blockNumber,
+              transactionHash: parsed.transactionHash,
+            });
+
+            let updated = bounties.get(parsed.tokenId);
+            if (!updated) {
+              // Bounty doesn't exist yet, create it with updated data
+              console.log(`[Indexer] Bounty updated (creating): tokenId=${parsed.tokenId}, newData=${parsed.newData}, block=${parsed.blockNumber}`);
+              updated = {
+                tokenId: parsed.tokenId,
+                data: parsed.newData,
+                lastUpdated: parsed.blockNumber,
+                // Other fields will be filled in by BountyCreated when processed
+              };
+              bounties.set(parsed.tokenId, updated);
+            } else {
               // Only update data if this is a newer event (don't overwrite newer data with older data)
               if (!updated.lastUpdated || parsed.blockNumber > updated.lastUpdated) {
                 updated.data = parsed.newData;
@@ -759,6 +855,7 @@ export async function getNewEventsInRange(publicClient, contractAddress, fromBlo
     return {
       bounties: Array.from(bounties.values()),
       claims: Object.fromEntries(claims),
+      updates: Object.fromEntries(updates),
     };
   } catch (error) {
     console.error('Error getting new events in range:', error);
